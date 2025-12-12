@@ -1,4 +1,4 @@
-# PCB to Stencil Converter
+# Gerber Solder Paste Layer to Solder Stencil Converter
 
 A Go tool to convert Gerber files (specifically solder paste layers) into 3D printable STL stencils.
 
@@ -20,8 +20,10 @@ go run main.go gerber.go [options] <path_to_gerber_file>
 
 ### Options
 
-- `--height, -h`: Stencil height in mm (default: 0.2mm).
-- `--keep-png, --kp`: Save the intermediate PNG image used for mesh generation (useful for debugging).
+- `--height`: Stencil height in mm (default: 0.2mm).
+- `--wall-height`: Wall height mm (default: 2.0mm).
+- `--wall-thickness`: Wall thickness in mm (default: 1mm).
+- `--keep-png`: Save the intermediate PNG image used for mesh generation (useful for debugging).
 
 ### Example
 

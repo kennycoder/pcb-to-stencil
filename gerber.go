@@ -219,9 +219,11 @@ func (gf *GerberFile) parseCoordinate(valStr string, fmtSpec struct{ Integer, De
 	return val / divisor
 }
 
-// Render generates an image from the parsed Gerber commands
-func (gf *GerberFile) Render(dpi float64) image.Image {
-	// 1. Calculate Bounds
+type Bounds struct {
+	MinX, MinY, MaxX, MaxY float64
+}
+
+func (gf *GerberFile) CalculateBounds() Bounds {
 	minX, minY := 1e9, 1e9
 	maxX, maxY := -1e9, -1e9
 
@@ -271,8 +273,20 @@ func (gf *GerberFile) Render(dpi float64) image.Image {
 	maxX += padding
 	maxY += padding
 
-	widthMM := maxX - minX
-	heightMM := maxY - minY
+	return Bounds{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}
+}
+
+// Render generates an image from the parsed Gerber commands
+func (gf *GerberFile) Render(dpi float64, bounds *Bounds) image.Image {
+	var b Bounds
+	if bounds != nil {
+		b = *bounds
+	} else {
+		b = gf.CalculateBounds()
+	}
+
+	widthMM := b.MaxX - b.MinX
+	heightMM := b.MaxY - b.MinY
 
 	var scale float64
 	if gf.State.Units == "IN" {
@@ -294,12 +308,12 @@ func (gf *GerberFile) Render(dpi float64) image.Image {
 
 	// Helper to convert mm to pixels
 	toPix := func(x, y float64) (int, int) {
-		px := int((x - minX) * scale)
-		py := int((heightMM - (y - minY)) * scale) // Flip Y for image coords
+		px := int((x - b.MinX) * scale)
+		py := int((heightMM - (y - b.MinY)) * scale) // Flip Y for image coords
 		return px, py
 	}
 
-	curX, curY = 0.0, 0.0
+	curX, curY := 0.0, 0.0
 	curDCode := 0
 
 	for _, cmd := range gf.Commands {
@@ -343,7 +357,7 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 		// Modifiers[0] is diameter
 		if len(ap.Modifiers) > 0 {
 			radius := int((ap.Modifiers[0] * scale) / 2)
-			drawCircle(img, x, y, radius, c)
+			drawCircle(img, x, y, radius)
 		}
 		return
 	case ApertureRect: // R
@@ -383,7 +397,7 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 					py := int(cy * scale)
 
 					radius := int((dia * scale) / 2)
-					drawCircle(img, x+px, y-py, radius, c)
+					drawCircle(img, x+px, y-py, radius)
 				}
 			case 21: // Center Line (Rect)
 				// Mods: Exposure, Width, Height, CenterX, CenterY, Rotation
@@ -421,7 +435,7 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 	}
 }
 
-func drawCircle(img *image.RGBA, x0, y0, r int, c image.Image) {
+func drawCircle(img *image.RGBA, x0, y0, r int) {
 	// Simple Bresenham or scanline
 	for y := -r; y <= r; y++ {
 		for x := -r; x <= r; x++ {
