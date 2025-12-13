@@ -49,6 +49,7 @@ type GerberState struct {
 type GerberCommand struct {
 	Type string // "D01", "D02", "D03", "AD", "FS", etc.
 	X, Y *float64
+	I, J *float64
 	D    *int
 }
 
@@ -79,7 +80,7 @@ func ParseGerber(filename string) (*GerberFile, error) {
 	scanner := bufio.NewScanner(file)
 
 	// Regex for coordinates: X123Y456D01
-	reCoord := regexp.MustCompile(`([XYD])([\d\.\-]+)`)
+	reCoord := regexp.MustCompile(`([XYDIJ])([\d\.\-]+)`)
 	// Regex for Aperture Definition: %ADD10C,0.5*%
 	reAD := regexp.MustCompile(`%ADD(\d+)([A-Za-z0-9_]+),?([\d\.X]+)?\*%`)
 	// Regex for Format Spec: %FSLAX24Y24*%
@@ -160,8 +161,20 @@ func ParseGerber(filename string) (*GerberFile, error) {
 				continue
 			}
 
-			// Check for G-codes (G54 is aperture selection in older files, but usually Dnn is used)
-			// We focus on D-codes and Coordinates
+			// Check for G-codes
+			if strings.HasPrefix(part, "G") {
+				if part == "G01" {
+					// Linear interpolation (default)
+					gf.Commands = append(gf.Commands, GerberCommand{Type: "G01"})
+				} else if part == "G02" {
+					// Clockwise circular interpolation
+					gf.Commands = append(gf.Commands, GerberCommand{Type: "G02"})
+				} else if part == "G03" {
+					// Counter-clockwise circular interpolation
+					gf.Commands = append(gf.Commands, GerberCommand{Type: "G03"})
+				}
+				continue
+			}
 
 			// Handle Aperture Selection (e.g., D10*)
 			if strings.HasPrefix(part, "D") && len(part) >= 2 {
@@ -188,6 +201,12 @@ func ParseGerber(filename string) (*GerberFile, error) {
 					case "Y":
 						v := gf.parseCoordinate(valStr, gf.State.FormatY)
 						cmd.Y = &v
+					case "I":
+						v := gf.parseCoordinate(valStr, gf.State.FormatX)
+						cmd.I = &v
+					case "J":
+						v := gf.parseCoordinate(valStr, gf.State.FormatY)
+						cmd.J = &v
 					case "D":
 						val, _ := strconv.ParseFloat(valStr, 64)
 						d := int(val)
@@ -315,10 +334,15 @@ func (gf *GerberFile) Render(dpi float64, bounds *Bounds) image.Image {
 
 	curX, curY := 0.0, 0.0
 	curDCode := 0
+	interpolationMode := "G01" // Default linear
 
 	for _, cmd := range gf.Commands {
 		if cmd.Type == "APERTURE" {
 			curDCode = *cmd.D
+			continue
+		}
+		if cmd.Type == "G01" || cmd.Type == "G02" || cmd.Type == "G03" {
+			interpolationMode = cmd.Type
 			continue
 		}
 
@@ -338,12 +362,60 @@ func (gf *GerberFile) Render(dpi float64, bounds *Bounds) image.Image {
 				gf.drawAperture(img, cx, cy, ap, scale, white)
 			}
 		} else if cmd.Type == "DRAW" {
-			// Draw Line from prevX, prevY to curX, curY using current aperture
 			ap, ok := gf.State.Apertures[curDCode]
 			if ok {
-				x1, y1 := toPix(prevX, prevY)
-				x2, y2 := toPix(curX, curY)
-				gf.drawLine(img, x1, y1, x2, y2, ap, scale, white)
+				if interpolationMode == "G01" {
+					// Linear
+					x1, y1 := toPix(prevX, prevY)
+					x2, y2 := toPix(curX, curY)
+					gf.drawLine(img, x1, y1, x2, y2, ap, scale, white)
+				} else {
+					// Circular Interpolation (G02/G03)
+					// I and J are offsets from start point (prevX, prevY) to center
+					iVal := 0.0
+					jVal := 0.0
+					if cmd.I != nil {
+						iVal = *cmd.I
+					}
+					if cmd.J != nil {
+						jVal = *cmd.J
+					}
+
+					centerX := prevX + iVal
+					centerY := prevY + jVal
+
+					radius := math.Sqrt(iVal*iVal + jVal*jVal)
+					startAngle := math.Atan2(prevY-centerY, prevX-centerX)
+					endAngle := math.Atan2(curY-centerY, curX-centerX)
+
+					// Adjust angles for G02 (CW) vs G03 (CCW)
+					if interpolationMode == "G03" { // CCW
+						if endAngle <= startAngle {
+							endAngle += 2 * math.Pi
+						}
+					} else { // G02 CW
+						if startAngle <= endAngle {
+							startAngle += 2 * math.Pi
+						}
+					}
+
+					// Arc length approximation
+					arcLen := math.Abs(endAngle-startAngle) * radius
+					steps := int(arcLen * scale * 2) // 2x pixel density for smoothness
+					if steps < 10 {
+						steps = 10
+					}
+
+					for s := 0; s <= steps; s++ {
+						t := float64(s) / float64(steps)
+						angle := startAngle + t*(endAngle-startAngle)
+						px := centerX + radius*math.Cos(angle)
+						py := centerY + radius*math.Sin(angle)
+
+						ix, iy := toPix(px, py)
+						gf.drawAperture(img, ix, iy, ap, scale, white)
+					}
+				}
 			}
 		}
 	}
