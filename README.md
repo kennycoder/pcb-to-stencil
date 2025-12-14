@@ -24,6 +24,8 @@ go run main.go gerber.go [options] <path_to_gerber_file> [optional_board_outline
 - `--wall-height`: Wall height mm (default: 2.0mm).
 - `--wall-thickness`: Wall thickness in mm (default: 1mm).
 - `--keep-png`: Save the intermediate PNG image used for mesh generation (useful for debugging).
+- `-server`: Start the web interface server.
+- `-port`: Port to run the server on (default: 8080).
 
 ### Example
 
@@ -32,6 +34,16 @@ go run main.go gerber.go -height=0.16 -keep-png my_board_paste_top.gbr my_board_
 ```
 
 This will generate `my_board_paste_top.stl` in the same directory.
+
+### Web Interface
+
+To start the web interface:
+
+```bash
+go run main.go gerber.go -server
+```
+
+Then open `http://localhost:8080` in your browser. You can upload files and configure settings via the UI.
 
 ## 3D Printing Recommendations
 
