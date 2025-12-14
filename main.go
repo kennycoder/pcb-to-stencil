@@ -1,26 +1,42 @@
 package main
 
 import (
+	"crypto/rand"
+	"embed"
 	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"html/template"
 	"image"
 	"image/png"
+	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // --- Configuration ---
-var DPI float64 = 1000.0 // Higher DPI = smoother curves
-var PixelToMM float64 = 25.4 / DPI
 
-var StencilHeight float64 = 0.16 // mm, default
-var WallHeight float64 = 2.0     // mm, default
-var WallThickness float64 = 1.0  // mm, default
-var KeepPNG bool
+type Config struct {
+	StencilHeight float64
+	WallHeight    float64
+	WallThickness float64
+	DPI           float64
+	KeepPNG       bool
+}
+
+// Default values
+const (
+	DefaultStencilHeight = 0.16
+	DefaultWallHeight    = 2.0
+	DefaultWallThickness = 1.0
+	DefaultDPI           = 1000.0
+)
 
 // --- STL Helpers ---
 
@@ -122,7 +138,7 @@ func AddBox(triangles *[][3]Point, x, y, w, h, zHeight float64) {
 // ComputeWallMask generates a mask for the wall based on the outline image.
 // It identifies the board area (inside the outline) and creates a wall of
 // specified thickness around it.
-func ComputeWallMask(img image.Image, thicknessMM float64) ([]bool, []bool) {
+func ComputeWallMask(img image.Image, thicknessMM float64, pixelToMM float64) ([]bool, []bool) {
 	bounds := img.Bounds()
 	w := bounds.Max.X
 	h := bounds.Max.Y
@@ -149,7 +165,7 @@ func ComputeWallMask(img image.Image, thicknessMM float64) ([]bool, []bool) {
 	// 2. Dilate Outline to close gaps
 	// We dilate by a small amount (e.g. 0.5mm) to ensure the outline is closed.
 	gapClosingMM := 0.5
-	gapClosingPixels := int(gapClosingMM / PixelToMM)
+	gapClosingPixels := int(gapClosingMM / pixelToMM)
 	if gapClosingPixels < 1 {
 		gapClosingPixels = 1
 	}
@@ -283,7 +299,7 @@ func ComputeWallMask(img image.Image, thicknessMM float64) ([]bool, []bool) {
 	// We want the wall to be strictly OUTSIDE the board (or centered on outline? User said "starts at outline").
 	// If we expand Board, we get pixels outside.
 
-	thicknessPixels := int(thicknessMM / PixelToMM)
+	thicknessPixels := int(thicknessMM / pixelToMM)
 	if thicknessPixels < 1 {
 		thicknessPixels = 1
 	}
@@ -334,7 +350,8 @@ func ComputeWallMask(img image.Image, thicknessMM float64) ([]bool, []bool) {
 	return isWall, isBoard
 }
 
-func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
+func GenerateMeshFromImages(stencilImg, outlineImg image.Image, cfg Config) [][3]Point {
+	pixelToMM := 25.4 / cfg.DPI
 	bounds := stencilImg.Bounds()
 	width := bounds.Max.X
 	height := bounds.Max.Y
@@ -344,7 +361,7 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 	var boardMask []bool
 	if outlineImg != nil {
 		fmt.Println("Computing wall mask...")
-		wallMask, boardMask = ComputeWallMask(outlineImg, WallThickness)
+		wallMask, boardMask = ComputeWallMask(outlineImg, cfg.WallThickness, pixelToMM)
 	}
 
 	// Optimization: Run-Length Encoding
@@ -372,10 +389,10 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 			// Determine height at this pixel
 			h := 0.0
 			if isWall {
-				h = WallHeight
+				h = cfg.WallHeight
 			} else if isStencilSolid {
 				if isInsideBoard {
-					h = StencilHeight
+					h = cfg.StencilHeight
 				}
 			}
 
@@ -388,10 +405,10 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 					stripLen := x - startX
 					AddBox(
 						&triangles,
-						float64(startX)*PixelToMM,
-						float64(y)*PixelToMM,
-						float64(stripLen)*PixelToMM,
-						PixelToMM,
+						float64(startX)*pixelToMM,
+						float64(y)*pixelToMM,
+						float64(stripLen)*pixelToMM,
+						pixelToMM,
 						currentHeight,
 					)
 					startX = x
@@ -403,10 +420,10 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 					stripLen := x - startX
 					AddBox(
 						&triangles,
-						float64(startX)*PixelToMM,
-						float64(y)*PixelToMM,
-						float64(stripLen)*PixelToMM,
-						PixelToMM,
+						float64(startX)*pixelToMM,
+						float64(y)*pixelToMM,
+						float64(stripLen)*pixelToMM,
+						pixelToMM,
 						currentHeight,
 					)
 					startX = -1
@@ -418,10 +435,10 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 			stripLen := width - startX
 			AddBox(
 				&triangles,
-				float64(startX)*PixelToMM,
-				float64(y)*PixelToMM,
-				float64(stripLen)*PixelToMM,
-				PixelToMM,
+				float64(startX)*pixelToMM,
+				float64(y)*pixelToMM,
+				float64(stripLen)*pixelToMM,
+				pixelToMM,
 				currentHeight,
 			)
 		}
@@ -429,41 +446,16 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 	return triangles
 }
 
-// --- Main ---
+// --- Logic ---
 
-func main() {
-	flag.Float64Var(&StencilHeight, "height", 0.16, "Stencil height in mm")
-	flag.Float64Var(&WallHeight, "wall-height", 2.0, "Wall height in mm")
-	flag.Float64Var(&WallThickness, "wall-thickness", 1, "Wall thickness in mm")
-	flag.Float64Var(&DPI, "dpi", 1000.0, "DPI for rendering (lower = smaller file, rougher curves)")
-	flag.BoolVar(&KeepPNG, "keep-png", false, "Save intermediate PNG file")
-	flag.Parse()
-
-	// Update PixelToMM based on DPI flag
-	PixelToMM = 25.4 / DPI
-
-	args := flag.Args()
-	if len(args) < 1 {
-		fmt.Println("Usage: go run main.go [options] <path_to_gerber_file> [path_to_outline_gerber_file]")
-		fmt.Println("Options:")
-		flag.PrintDefaults()
-		fmt.Println("Example: go run main.go -height=0.3 MyPCB.GTP MyPCB.GKO")
-		os.Exit(1)
-	}
-
-	gerberPath := args[0]
-	var outlinePath string
-	if len(args) > 1 {
-		outlinePath = args[1]
-	}
-
+func processPCB(gerberPath, outlinePath string, cfg Config) (string, error) {
 	outputPath := strings.TrimSuffix(gerberPath, filepath.Ext(gerberPath)) + ".stl"
 
 	// 1. Parse Gerber(s)
 	fmt.Printf("Parsing %s...\n", gerberPath)
 	gf, err := ParseGerber(gerberPath)
 	if err != nil {
-		log.Fatalf("Error parsing gerber: %v", err)
+		return "", fmt.Errorf("error parsing gerber: %v", err)
 	}
 
 	var outlineGf *GerberFile
@@ -471,7 +463,7 @@ func main() {
 		fmt.Printf("Parsing outline %s...\n", outlinePath)
 		outlineGf, err = ParseGerber(outlinePath)
 		if err != nil {
-			log.Fatalf("Error parsing outline gerber: %v", err)
+			return "", fmt.Errorf("error parsing outline gerber: %v", err)
 		}
 	}
 
@@ -494,8 +486,7 @@ func main() {
 	}
 
 	// Expand bounds to accommodate wall thickness and prevent clipping
-	// We add WallThickness + extra margin to all sides
-	margin := WallThickness + 5.0 // mm
+	margin := cfg.WallThickness + 5.0 // mm
 	bounds.MinX -= margin
 	bounds.MinY -= margin
 	bounds.MaxX += margin
@@ -503,15 +494,15 @@ func main() {
 
 	// 3. Render to Image(s)
 	fmt.Println("Rendering to internal image...")
-	img := gf.Render(DPI, &bounds)
+	img := gf.Render(cfg.DPI, &bounds)
 
 	var outlineImg image.Image
 	if outlineGf != nil {
 		fmt.Println("Rendering outline to internal image...")
-		outlineImg = outlineGf.Render(DPI, &bounds)
+		outlineImg = outlineGf.Render(cfg.DPI, &bounds)
 	}
 
-	if KeepPNG {
+	if cfg.KeepPNG {
 		pngPath := strings.TrimSuffix(gerberPath, filepath.Ext(gerberPath)) + ".png"
 		fmt.Printf("Saving intermediate PNG to %s...\n", pngPath)
 		f, err := os.Create(pngPath)
@@ -523,32 +514,231 @@ func main() {
 			}
 			f.Close()
 		}
-
-		if outlineImg != nil {
-			outlinePngPath := strings.TrimSuffix(gerberPath, filepath.Ext(gerberPath)) + "_outline.png"
-			fmt.Printf("Saving intermediate Outline PNG to %s...\n", outlinePngPath)
-			f, err := os.Create(outlinePngPath)
-			if err != nil {
-				log.Printf("Warning: Could not create Outline PNG file: %v", err)
-			} else {
-				if err := png.Encode(f, outlineImg); err != nil {
-					log.Printf("Warning: Could not encode Outline PNG: %v", err)
-				}
-				f.Close()
-			}
-		}
 	}
 
 	// 4. Generate Mesh
-	fmt.Println("Generating mesh (this may take 10-20 seconds for large boards)...")
-	triangles := GenerateMeshFromImages(img, outlineImg)
+	fmt.Println("Generating mesh...")
+	triangles := GenerateMeshFromImages(img, outlineImg, cfg)
 
 	// 5. Save STL
 	fmt.Printf("Saving to %s (%d triangles)...\n", outputPath, len(triangles))
 	err = WriteSTL(outputPath, triangles)
 	if err != nil {
-		log.Fatalf("Error writing STL: %v", err)
+		return "", fmt.Errorf("error writing STL: %v", err)
 	}
 
+	return outputPath, nil
+}
+
+// --- CLI ---
+
+func runCLI(cfg Config, args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: go run main.go [options] <path_to_gerber_file> [path_to_outline_gerber_file]")
+		fmt.Println("Options:")
+		flag.PrintDefaults()
+		fmt.Println("Example: go run main.go -height=0.3 MyPCB.GTP MyPCB.GKO")
+		os.Exit(1)
+	}
+
+	gerberPath := args[0]
+	var outlinePath string
+	if len(args) > 1 {
+		outlinePath = args[1]
+	}
+
+	_, err := processPCB(gerberPath, outlinePath, cfg)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
 	fmt.Println("Success! Happy printing.")
+}
+
+// --- Server ---
+
+//go:embed static/*
+var staticFiles embed.FS
+
+func randomID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	// Read index.html from embedded FS
+	content, err := staticFiles.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "Could not load index page", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	w.Write(content)
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Create temp dir
+	tempDir := filepath.Join(".", "temp")
+	os.MkdirAll(tempDir, 0755)
+
+	uuid := randomID()
+
+	// Parse params
+	height, _ := strconv.ParseFloat(r.FormValue("height"), 64)
+	dpi, _ := strconv.ParseFloat(r.FormValue("dpi"), 64)
+	wallHeight, _ := strconv.ParseFloat(r.FormValue("wallHeight"), 64)
+	wallThickness, _ := strconv.ParseFloat(r.FormValue("wallThickness"), 64)
+
+	if height == 0 {
+		height = DefaultStencilHeight
+	}
+	if dpi == 0 {
+		dpi = DefaultDPI
+	}
+	if wallHeight == 0 {
+		wallHeight = DefaultWallHeight
+	}
+	if wallThickness == 0 {
+		wallThickness = DefaultWallThickness
+	}
+
+	cfg := Config{
+		StencilHeight: height,
+		WallHeight:    wallHeight,
+		WallThickness: wallThickness,
+		DPI:           dpi,
+		KeepPNG:       false,
+	}
+
+	// Handle Gerber File
+	file, header, err := r.FormFile("gerber")
+	if err != nil {
+		http.Error(w, "Error retrieving gerber file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	gerberPath := filepath.Join(tempDir, uuid+"_paste"+filepath.Ext(header.Filename))
+	outFile, err := os.Create(gerberPath)
+	if err != nil {
+		http.Error(w, "Server error saving file", http.StatusInternalServerError)
+		return
+	}
+	defer outFile.Close()
+	io.Copy(outFile, file)
+
+	// Handle Outline File (Optional)
+	outlineFile, outlineHeader, err := r.FormFile("outline")
+	var outlinePath string
+	if err == nil {
+		defer outlineFile.Close()
+		outlinePath = filepath.Join(tempDir, uuid+"_outline"+filepath.Ext(outlineHeader.Filename))
+		outOutline, err := os.Create(outlinePath)
+		if err == nil {
+			defer outOutline.Close()
+			io.Copy(outOutline, outlineFile)
+		}
+	}
+
+	// Process
+	outSTL, err := processPCB(gerberPath, outlinePath, cfg)
+	if err != nil {
+		log.Printf("Error processing: %v", err)
+		http.Error(w, fmt.Sprintf("Error processing PCB: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Render Success
+	tmpl, err := template.ParseFS(staticFiles, "static/result.html")
+	if err != nil {
+		http.Error(w, "Template error", http.StatusInternalServerError)
+		return
+	}
+	data := struct{ Filename string }{Filename: filepath.Base(outSTL)}
+	tmpl.Execute(w, data)
+}
+
+func downloadHandler(w http.ResponseWriter, r *http.Request) {
+	vars := strings.Split(r.URL.Path, "/")
+	if len(vars) < 3 {
+		http.NotFound(w, r)
+		return
+	}
+	filename := vars[2]
+
+	// Security check: ensure no path traversal
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	path := filepath.Join("temp", filename)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, path)
+}
+
+func runServer(port string) {
+	// Serve static files (CSS, etc.)
+	// This will serve files under /static/ from the embedded fs
+	http.Handle("/static/", http.FileServer(http.FS(staticFiles)))
+
+	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/upload", uploadHandler)
+	http.HandleFunc("/download/", downloadHandler)
+
+	fmt.Printf("Starting server on http://0.0.0.0:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+// --- Main ---
+
+var (
+	flagStencilHeight float64
+	flagWallHeight    float64
+	flagWallThickness float64
+	flagDPI           float64
+	flagKeepPNG       bool
+	flagServer        bool
+	flagPort          string
+)
+
+func main() {
+	flag.Float64Var(&flagStencilHeight, "height", DefaultStencilHeight, "Stencil height in mm")
+	flag.Float64Var(&flagWallHeight, "wall-height", DefaultWallHeight, "Wall height in mm")
+	flag.Float64Var(&flagWallThickness, "wall-thickness", DefaultWallThickness, "Wall thickness in mm")
+	flag.Float64Var(&flagDPI, "dpi", DefaultDPI, "DPI for rendering (lower = smaller file, rougher curves)")
+	flag.BoolVar(&flagKeepPNG, "keep-png", false, "Save intermediate PNG file")
+
+	flag.BoolVar(&flagServer, "server", false, "Start in server mode")
+	flag.StringVar(&flagPort, "port", "8080", "Port to run the server on")
+
+	flag.Parse()
+
+	if flagServer {
+		runServer(flagPort)
+	} else {
+		cfg := Config{
+			StencilHeight: flagStencilHeight,
+			WallHeight:    flagWallHeight,
+			WallThickness: flagWallThickness,
+			DPI:           flagDPI,
+			KeepPNG:       flagKeepPNG,
+		}
+		runCLI(cfg, flag.Args())
+	}
 }

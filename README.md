@@ -15,12 +15,12 @@ A Go tool to convert Gerber files (specifically solder paste layers) into 3D pri
 Run the tool using `go run`:
 
 ```bash
-go run main.go gerber.go [options] <path_to_gerber_file>
+go run main.go gerber.go [options] <path_to_gerber_file> [optional_board_outline_file]
 ```
 
 ### Options
 
-- `--height`: Stencil height in mm (default: 0.2mm).
+- `--height`: Stencil height in mm (default: 0.16mm).
 - `--wall-height`: Wall height mm (default: 2.0mm).
 - `--wall-thickness`: Wall thickness in mm (default: 1mm).
 - `--keep-png`: Save the intermediate PNG image used for mesh generation (useful for debugging).
@@ -28,10 +28,22 @@ go run main.go gerber.go [options] <path_to_gerber_file>
 ### Example
 
 ```bash
-go run main.go gerber.go -height=0.25 -keep-png my_board_paste_top.gbr
+go run main.go gerber.go -height=0.16 -keep-png my_board_paste_top.gbr my_board_outline.gbr
 ```
 
 This will generate `my_board_paste_top.stl` in the same directory.
+
+## 3D Printing Recommendations
+
+For optimal results with small SMD packages (like TSSOP, 0402, etc.), use the following 3D print settings:
+
+-   **Nozzle Size**: 0.2mm (Highly recommended for sharp corners and fine apertures).
+-   **Layer Height**: 0.16mm total height.
+    -   **First Layer**: 0.10mm
+    -   **Second Layer**: 0.06mm
+-   **Build Surface**: Smooth PEI sheet (Ensures the bottom of the stencil is perfectly flat for good PCB adhesion).
+
+These settings assume you run the tool with `-height=0.16` (the default).
 
 ## How it Works
 
