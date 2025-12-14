@@ -17,9 +17,9 @@ import (
 var DPI float64 = 1000.0 // Higher DPI = smoother curves
 var PixelToMM float64 = 25.4 / DPI
 
-var StencilHeight float64 = 0.2 // mm, default
-var WallHeight float64 = 2.0    // mm, default
-var WallThickness float64 = 1.0 // mm, default
+var StencilHeight float64 = 0.16 // mm, default
+var WallHeight float64 = 2.0     // mm, default
+var WallThickness float64 = 1.0  // mm, default
 var KeepPNG bool
 
 // --- STL Helpers ---
@@ -432,7 +432,7 @@ func GenerateMeshFromImages(stencilImg, outlineImg image.Image) [][3]Point {
 // --- Main ---
 
 func main() {
-	flag.Float64Var(&StencilHeight, "height", 0.2, "Stencil height in mm")
+	flag.Float64Var(&StencilHeight, "height", 0.16, "Stencil height in mm")
 	flag.Float64Var(&WallHeight, "wall-height", 2.0, "Wall height in mm")
 	flag.Float64Var(&WallThickness, "wall-thickness", 1, "Wall thickness in mm")
 	flag.Float64Var(&DPI, "dpi", 1000.0, "DPI for rendering (lower = smaller file, rougher curves)")
