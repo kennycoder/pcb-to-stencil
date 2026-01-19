@@ -27,7 +27,7 @@ type Aperture struct {
 
 type MacroPrimitive struct {
 	Code      int
-	Modifiers []float64
+	Modifiers []string // Store as strings to handle $1, $2, expressions like $1+$1
 }
 
 type Macro struct {
@@ -81,8 +81,8 @@ func ParseGerber(filename string) (*GerberFile, error) {
 
 	// Regex for coordinates: X123Y456D01
 	reCoord := regexp.MustCompile(`([XYDIJ])([\d\.\-]+)`)
-	// Regex for Aperture Definition: %ADD10C,0.5*%
-	reAD := regexp.MustCompile(`%ADD(\d+)([A-Za-z0-9_]+),?([\d\.X]+)?\*%`)
+	// Regex for Aperture Definition: %ADD10C,0.5*% or %ADD10RoundRect,0.25X-0.75X...*%
+	reAD := regexp.MustCompile(`%ADD(\d+)([A-Za-z0-9_]+),?([\d\.\-X]+)?\*%`)
 	// Regex for Format Spec: %FSLAX24Y24*%
 	reFS := regexp.MustCompile(`%FSLAX(\d)(\d)Y(\d)(\d)\*%`)
 
@@ -126,19 +126,39 @@ func ParseGerber(filename string) (*GerberFile, error) {
 
 				for scanner.Scan() {
 					mLine := strings.TrimSpace(scanner.Text())
-					if mLine == "%" {
-						break
+					// Skip comment lines (start with "0 ")
+					if strings.HasPrefix(mLine, "0 ") {
+						continue
 					}
+					// Skip empty lines
+					if mLine == "" {
+						continue
+					}
+					
+					// Check if this line ends the macro definition
+					endsWithPercent := strings.HasSuffix(mLine, "*%")
+					
+					// Remove trailing *% or just *
+					mLine = strings.TrimSuffix(mLine, "*%")
 					mLine = strings.TrimSuffix(mLine, "*")
+					
+					// Parse primitive
 					parts := strings.Split(mLine, ",")
-					if len(parts) > 0 {
-						code, _ := strconv.Atoi(parts[0])
-						var mods []float64
-						for _, p := range parts[1:] {
-							val, _ := strconv.ParseFloat(p, 64)
-							mods = append(mods, val)
+					if len(parts) > 0 && parts[0] != "" {
+						code, err := strconv.Atoi(parts[0])
+						if err == nil && code > 0 {
+							// Store modifiers as strings to handle $1, $2, expressions
+							var mods []string
+							for _, p := range parts[1:] {
+								mods = append(mods, strings.TrimSpace(p))
+							}
+							primitives = append(primitives, MacroPrimitive{Code: code, Modifiers: mods})
 						}
-						primitives = append(primitives, MacroPrimitive{Code: code, Modifiers: mods})
+					}
+					
+					// If line ended with *%, macro definition is complete
+					if endsWithPercent {
+						break
 					}
 				}
 				gf.State.Macros[name] = Macro{Name: name, Primitives: primitives}
@@ -236,6 +256,56 @@ func (gf *GerberFile) parseCoordinate(valStr string, fmtSpec struct{ Integer, De
 	val, _ := strconv.ParseFloat(valStr, 64)
 	divisor := math.Pow(10, float64(fmtSpec.Decimal))
 	return val / divisor
+}
+
+// evaluateMacroExpression evaluates a macro expression like "$1", "$1+$1", "0.5", etc.
+// with variable substitution from aperture modifiers
+func evaluateMacroExpression(expr string, params []float64) float64 {
+	expr = strings.TrimSpace(expr)
+	
+	// Handle simple addition (e.g., "$1+$1")
+	if strings.Contains(expr, "+") {
+		parts := strings.Split(expr, "+")
+		result := 0.0
+		for _, part := range parts {
+			result += evaluateMacroExpression(strings.TrimSpace(part), params)
+		}
+		return result
+	}
+	
+	// Handle simple subtraction (e.g., "$1-$2")
+	if strings.Contains(expr, "-") && !strings.HasPrefix(expr, "-") {
+		parts := strings.Split(expr, "-")
+		if len(parts) == 2 {
+			left := evaluateMacroExpression(strings.TrimSpace(parts[0]), params)
+			right := evaluateMacroExpression(strings.TrimSpace(parts[1]), params)
+			return left - right
+		}
+	}
+	
+	// Handle variable substitution (e.g., "$1", "$2")
+	if strings.HasPrefix(expr, "$") {
+		varNum, err := strconv.Atoi(expr[1:])
+		if err == nil && varNum > 0 && varNum <= len(params) {
+			return params[varNum-1]
+		}
+		return 0.0
+	}
+	
+	// Handle literal numbers
+	val, _ := strconv.ParseFloat(expr, 64)
+	return val
+}
+
+// rotatePoint rotates a point (x, y) around the origin by angleDegrees
+func rotatePoint(x, y, angleDegrees float64) (float64, float64) {
+	if angleDegrees == 0 {
+		return x, y
+	}
+	angleRad := angleDegrees * math.Pi / 180.0
+	cosA := math.Cos(angleRad)
+	sinA := math.Sin(angleRad)
+	return x*cosA - y*sinA, x*sinA + y*cosA
 }
 
 type Bounds struct {
@@ -460,10 +530,13 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 			case 1: // Circle
 				// Mods: Exposure, Diameter, CenterX, CenterY
 				if len(prim.Modifiers) >= 4 {
-					// exposure := prim.Modifiers[0] // 1=on, 0=off (assuming 1 for now)
-					dia := prim.Modifiers[1]
-					cx := prim.Modifiers[2]
-					cy := prim.Modifiers[3]
+					exposure := evaluateMacroExpression(prim.Modifiers[0], ap.Modifiers)
+					if exposure == 0 {
+						break
+					}
+					dia := evaluateMacroExpression(prim.Modifiers[1], ap.Modifiers)
+					cx := evaluateMacroExpression(prim.Modifiers[2], ap.Modifiers)
+					cy := evaluateMacroExpression(prim.Modifiers[3], ap.Modifiers)
 
 					px := int(cx * scale)
 					py := int(cy * scale)
@@ -471,36 +544,120 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 					radius := int((dia * scale) / 2)
 					drawCircle(img, x+px, y-py, radius)
 				}
+			case 4: // Outline (Polygon)
+				// Mods: Exposure, NumVertices, X1, Y1, ..., Xn, Yn, Rotation
+				if len(prim.Modifiers) >= 3 {
+					exposure := evaluateMacroExpression(prim.Modifiers[0], ap.Modifiers)
+					if exposure == 0 {
+						// Skip if exposure is off
+						break
+					}
+					numVertices := int(evaluateMacroExpression(prim.Modifiers[1], ap.Modifiers))
+					// Need at least numVertices * 2 coordinates + rotation
+					if len(prim.Modifiers) >= 2+numVertices*2+1 {
+						rotation := evaluateMacroExpression(prim.Modifiers[2+numVertices*2], ap.Modifiers)
+						
+						// Extract vertices
+						vertices := make([][2]int, numVertices)
+						for i := 0; i < numVertices; i++ {
+							vx := evaluateMacroExpression(prim.Modifiers[2+i*2], ap.Modifiers)
+							vy := evaluateMacroExpression(prim.Modifiers[2+i*2+1], ap.Modifiers)
+							
+							// Apply rotation
+							vx, vy = rotatePoint(vx, vy, rotation)
+							
+							px := int(vx * scale)
+							py := int(vy * scale)
+							
+							vertices[i] = [2]int{x + px, y - py}
+						}
+						
+						// Draw filled polygon using scanline algorithm
+						drawFilledPolygon(img, vertices, c)
+					}
+				}
+			case 20: // Vector Line
+				// Mods: Exposure, Width, StartX, StartY, EndX, EndY, Rotation
+				if len(prim.Modifiers) >= 7 {
+					exposure := evaluateMacroExpression(prim.Modifiers[0], ap.Modifiers)
+					if exposure == 0 {
+						// Skip if exposure is off
+						break
+					}
+					width := evaluateMacroExpression(prim.Modifiers[1], ap.Modifiers)
+					startX := evaluateMacroExpression(prim.Modifiers[2], ap.Modifiers)
+					startY := evaluateMacroExpression(prim.Modifiers[3], ap.Modifiers)
+					endX := evaluateMacroExpression(prim.Modifiers[4], ap.Modifiers)
+					endY := evaluateMacroExpression(prim.Modifiers[5], ap.Modifiers)
+					rotation := evaluateMacroExpression(prim.Modifiers[6], ap.Modifiers)
+					
+					// Apply rotation to start and end points
+					startX, startY = rotatePoint(startX, startY, rotation)
+					endX, endY = rotatePoint(endX, endY, rotation)
+					
+					// Calculate the rectangle representing the line
+					// The line goes from (startX, startY) to (endX, endY) with width
+					dx := endX - startX
+					dy := endY - startY
+					length := math.Sqrt(dx*dx + dy*dy)
+					
+					if length > 0 {
+						// Perpendicular vector for width
+						perpX := -dy / length * width / 2
+						perpY := dx / length * width / 2
+						
+						// Four corners of the rectangle
+						vertices := [][2]int{
+							{x + int((startX-perpX)*scale), y - int((startY-perpY)*scale)},
+							{x + int((startX+perpX)*scale), y - int((startY+perpY)*scale)},
+							{x + int((endX+perpX)*scale), y - int((endY+perpY)*scale)},
+							{x + int((endX-perpX)*scale), y - int((endY-perpY)*scale)},
+						}
+						
+						drawFilledPolygon(img, vertices, c)
+					}
+				}
 			case 21: // Center Line (Rect)
 				// Mods: Exposure, Width, Height, CenterX, CenterY, Rotation
 				if len(prim.Modifiers) >= 6 {
-					width := prim.Modifiers[1]
-					height := prim.Modifiers[2]
-					cx := prim.Modifiers[3]
-					cy := prim.Modifiers[4]
-					rot := prim.Modifiers[5]
-
-					// Normalize rotation to 0-360
-					rot = math.Mod(rot, 360)
-					if rot < 0 {
-						rot += 360
+					exposure := evaluateMacroExpression(prim.Modifiers[0], ap.Modifiers)
+					if exposure == 0 {
+						break
 					}
+					width := evaluateMacroExpression(prim.Modifiers[1], ap.Modifiers)
+					height := evaluateMacroExpression(prim.Modifiers[2], ap.Modifiers)
+					cx := evaluateMacroExpression(prim.Modifiers[3], ap.Modifiers)
+					cy := evaluateMacroExpression(prim.Modifiers[4], ap.Modifiers)
+					rot := evaluateMacroExpression(prim.Modifiers[5], ap.Modifiers)
 
-					// Handle simple 90-degree rotations (swap width/height)
-					if math.Abs(rot-90) < 1.0 || math.Abs(rot-270) < 1.0 {
-						width, height = height, width
+					// Calculate the four corners of the rectangle (centered at origin)
+					halfW := width / 2
+					halfH := height / 2
+					
+					// Four corners before rotation
+					corners := [][2]float64{
+						{-halfW, -halfH},
+						{halfW, -halfH},
+						{halfW, halfH},
+						{-halfW, halfH},
 					}
-
-					w := int(width * scale)
-					h := int(height * scale)
-					icx := int(cx * scale)
-					icy := int(cy * scale)
-
-					rx := x + icx
-					ry := y - icy
-
-					r := image.Rect(rx-w/2, ry-h/2, rx+w/2, ry+h/2)
-					draw.Draw(img, r, c, image.Point{}, draw.Src)
+					
+					// Apply rotation and translation
+					vertices := make([][2]int, 4)
+					for i, corner := range corners {
+						// Rotate around origin
+						rx, ry := rotatePoint(corner[0], corner[1], rot)
+						// Translate to center position
+						rx += cx
+						ry += cy
+						// Convert to pixels
+						px := int(rx * scale)
+						py := int(ry * scale)
+						vertices[i] = [2]int{x + px, y - py}
+					}
+					
+					// Draw as polygon
+					drawFilledPolygon(img, vertices, c)
 				}
 			}
 		}
@@ -513,6 +670,62 @@ func drawCircle(img *image.RGBA, x0, y0, r int) {
 		for x := -r; x <= r; x++ {
 			if x*x+y*y <= r*r {
 				img.Set(x0+x, y0+y, color.White)
+			}
+		}
+	}
+}
+
+func drawFilledPolygon(img *image.RGBA, vertices [][2]int, c image.Image) {
+	if len(vertices) < 3 {
+		return
+	}
+
+	// Find bounding box
+	minY, maxY := vertices[0][1], vertices[0][1]
+	for _, v := range vertices {
+		if v[1] < minY {
+			minY = v[1]
+		}
+		if v[1] > maxY {
+			maxY = v[1]
+		}
+	}
+
+	// Scanline fill algorithm
+	for y := minY; y <= maxY; y++ {
+		// Find intersections with polygon edges
+		var intersections []int
+
+		for i := 0; i < len(vertices); i++ {
+			j := (i + 1) % len(vertices)
+			y1, y2 := vertices[i][1], vertices[j][1]
+			x1, x2 := vertices[i][0], vertices[j][0]
+
+			// Check if scanline intersects this edge
+			if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
+				// Calculate x intersection
+				x := x1 + (y-y1)*(x2-x1)/(y2-y1)
+				intersections = append(intersections, x)
+			}
+		}
+
+		// Sort intersections
+		for i := 0; i < len(intersections)-1; i++ {
+			for j := i + 1; j < len(intersections); j++ {
+				if intersections[i] > intersections[j] {
+					intersections[i], intersections[j] = intersections[j], intersections[i]
+				}
+			}
+		}
+
+		// Fill between pairs of intersections
+		for i := 0; i < len(intersections)-1; i += 2 {
+			x1 := intersections[i]
+			x2 := intersections[i+1]
+			for x := x1; x <= x2; x++ {
+				if x >= 0 && x < img.Bounds().Max.X && y >= 0 && y < img.Bounds().Max.Y {
+					img.Set(x, y, color.White)
+				}
 			}
 		}
 	}
