@@ -136,6 +136,12 @@ func ParseGerber(filename string) (*GerberFile, error) {
 					}
 					
 					// Check if this line ends the macro definition
+					// Standard allows ending with *% at end of last primitive OR a separate line with %
+					trimmedLine := strings.TrimSpace(mLine)
+					if trimmedLine == "%" {
+						break
+					}
+					
 					endsWithPercent := strings.HasSuffix(mLine, "*%")
 					
 					// Remove trailing *% or just *
@@ -512,13 +518,52 @@ func (gf *GerberFile) drawAperture(img *image.RGBA, x, y int, ap Aperture, scale
 		}
 		return
 	case ApertureObround: // O
-		// Similar to rect but with rounded corners. For now, treat as Rect or implement properly.
-		// Implementing as Rect for MVP
+		// Modifiers[0] is width, [1] is height
 		if len(ap.Modifiers) >= 2 {
 			w := int(ap.Modifiers[0] * scale)
 			h := int(ap.Modifiers[1] * scale)
-			r := image.Rect(x-w/2, y-h/2, x+w/2, y+h/2)
-			draw.Draw(img, r, c, image.Point{}, draw.Src)
+			// Draw Obround
+			// If w > h: Horizontal Pill. Central Rect is (w-h) x h. Two circles of dia h.
+			// If h > w: Vertical Pill. Central Rect is w x (h-w). Two circles of dia w.
+			// If w == h: Circle dia w.
+
+			drawObround := func(target *image.RGBA, x, y, w, h int, color image.Image) {
+				if w == h {
+					radius := w / 2
+					drawCircle(target, x, y, radius)
+					return
+				}
+
+				if w > h {
+					// Horizontal
+					rectW := w - h
+					if rectW < 0 { rectW = 0 } // Should be impossible if w > h
+					
+					// Center Rect
+					r := image.Rect(x-rectW/2, y-h/2, x+rectW/2, y+h/2)
+					draw.Draw(target, r, color, image.Point{}, draw.Src)
+					
+					// Left Circle
+					drawCircle(target, x-rectW/2, y, h/2)
+					// Right Circle
+					drawCircle(target, x+rectW/2, y, h/2)
+				} else {
+					// Vertical
+					rectH := h - w
+					if rectH < 0 { rectH = 0 }
+					
+					// Center Rect
+					r := image.Rect(x-w/2, y-rectH/2, x+w/2, y+rectH/2)
+					draw.Draw(target, r, color, image.Point{}, draw.Src)
+					
+					// Top Circle (Y decreases upwards in image coords usually, but here we treat y as center)
+                    // Note: In our coordinate system, y is center.
+					drawCircle(target, x, y-rectH/2, w/2)
+					// Bottom Circle
+					drawCircle(target, x, y+rectH/2, w/2)
+				}
+			}
+			drawObround(img, x, y, w, h, c)
 		}
 		return
 	}
